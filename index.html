@@ -193,6 +193,22 @@
                                  // so we run a simple heuristic: try ko-KR, and if result looks
                                  // like it's mostly Latin characters, treat as English text
                                  // and re-translate accordingly. See classifyText().
+  let lastFinalText = '';       // dedup guard: text of the most recent finalized entry
+  let lastFinalTime = 0;        // dedup guard: timestamp of the most recent finalized entry
+
+  // Returns true if this text is a near-duplicate of the last finalized entry
+  // (handles cases where the recognizer re-emits the same utterance as final
+  // more than once, especially around an automatic restart boundary).
+  function isDuplicateFinal(text){
+    const now = Date.now();
+    const withinWindow = (now - lastFinalTime) < 4000;
+    if(!withinWindow) return false;
+    if(text === lastFinalText) return true;
+    if(text.length > 0 && lastFinalText.length > 0){
+      if(lastFinalText.includes(text) || text.includes(lastFinalText)) return true;
+    }
+    return false;
+  }
 
   function setStatus(state){
     if(state === 'live'){
@@ -315,7 +331,19 @@
       }
 
       if(finalText.trim()){
-        finalizeEntry(currentEntryEl, finalText.trim(), effectiveLang);
+        const cleanFinal = finalText.trim();
+        if(isDuplicateFinal(cleanFinal)){
+          // Same utterance re-emitted as final (common right after an
+          // auto-restart) — drop the in-progress entry instead of duplicating.
+          if(currentEntryEl){
+            currentEntryEl.remove();
+            currentEntryEl = null;
+          }
+          return;
+        }
+        lastFinalText = cleanFinal;
+        lastFinalTime = Date.now();
+        finalizeEntry(currentEntryEl, cleanFinal, effectiveLang);
         currentEntryEl = null;
       } else {
         updateInterim(currentEntryEl, interimText.trim(), effectiveLang);
