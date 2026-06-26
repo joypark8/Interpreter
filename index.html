@@ -141,7 +141,7 @@
 <body>
 <div id="app">
   <header>
-    <h1>회의 통역 · Live</h1>
+    <h1>회의 받아쓰기 · Live</h1>
     <div class="status">
       <span class="dot" id="statusDot"></span>
       <span id="statusText">대기 중</span>
@@ -150,15 +150,15 @@
 
   <div id="feed">
     <div id="feed-empty">
-      아래 버튼을 눌러 통역을 시작하세요.<br>
-      한국어와 영어를 자동으로 인식해서<br>서로의 언어로 번역해 드립니다.
+      아래 버튼을 눌러 받아쓰기를 시작하세요.<br>
+      한국어와 영어를 자동으로 감지해서<br>들리는 그대로 보여드립니다.
     </div>
   </div>
 
   <footer>
     <div id="errorBox"></div>
     <div class="row">
-      <button id="micBtn">통역 시작</button>
+      <button id="micBtn">받아쓰기 시작</button>
       <button id="clearBtn" title="기록 지우기">⟲</button>
     </div>
     <div class="hint">말 중간에 잠시 멈춰도 끊기지 않습니다 · Chrome 권장</div>
@@ -197,6 +197,10 @@
   let lastFinalTime = 0;        // dedup guard: timestamp of the most recent finalized entry
   let pendingInterimText = '';  // last interim text seen, in case the session ends before it's finalized
   let pendingInterimLang = 'ko';
+  let lastResultTime = Date.now(); // last time onresult actually fired — used by the watchdog
+  let watchdogTimer = null;        // detects a "stuck" session (status says live but no results coming)
+  const WATCHDOG_INTERVAL_MS = 1200; // how often we check
+  const STUCK_THRESHOLD_MS = 2500;   // if no result for this long while running, force-restart
 
   // Returns true if this text is a near-duplicate of the last finalized entry
   // (handles cases where the recognizer re-emits the same utterance as final
@@ -216,12 +220,12 @@
     if(state === 'live'){
       statusDot.classList.add('live');
       statusText.textContent = '듣는 중';
-      micBtn.textContent = '통역 중지';
+      micBtn.textContent = '받아쓰기 중지';
       micBtn.classList.add('active');
     } else {
       statusDot.classList.remove('live');
       statusText.textContent = '대기 중';
-      micBtn.textContent = '통역 시작';
+      micBtn.textContent = '받아쓰기 시작';
       micBtn.classList.remove('active');
     }
   }
@@ -254,42 +258,23 @@
     el.innerHTML = `
       <div class="ts">${timeNow()}</div>
       <div class="src-line"><span class="tag ko" style="display:none;"></span><span class="src-text"></span></div>
-      <div class="trans-line"><span class="trans-text">번역 중…</span></div>
     `;
     feed.appendChild(el);
     feed.scrollTop = feed.scrollHeight;
     return el;
   }
 
-  async function translateText(text, sourceLang){
-    // sourceLang: 'ko' or 'en'. Target is the opposite.
-    const target = sourceLang === 'ko' ? 'en' : 'ko';
-    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sourceLang}&tl=${target}&dt=t&q=${encodeURIComponent(text)}`;
-    try{
-      const res = await fetch(url);
-      const data = await res.json();
-      // data[0] is an array of [translatedChunk, originalChunk, ...]
-      return data[0].map(chunk => chunk[0]).join('');
-    } catch(e){
-      return '(번역 실패 — 인터넷 연결을 확인하세요)';
-    }
-  }
-
   function finalizeEntry(el, text, lang){
     el.classList.remove('interim');
     const tagSpan = el.querySelector('.tag');
     const srcText = el.querySelector('.src-text');
-    const transText = el.querySelector('.trans-text');
+    const transLine = el.querySelector('.trans-line');
 
     tagSpan.style.display = 'inline-block';
     tagSpan.textContent = lang === 'ko' ? 'KO' : 'EN';
     tagSpan.className = 'tag ' + lang;
     srcText.textContent = text;
-
-    translateText(text, lang).then(translated => {
-      transText.textContent = translated;
-      feed.scrollTop = feed.scrollHeight;
-    });
+    if(transLine) transLine.style.display = 'none';
   }
 
   function updateInterim(el, text, lang){
@@ -310,6 +295,7 @@
     rec.maxAlternatives = 1;
 
     rec.onresult = (event) => {
+      lastResultTime = Date.now();
       let interimText = '';
       let finalText = '';
 
@@ -405,6 +391,35 @@
     return rec;
   }
 
+  function startWatchdog(){
+    stopWatchdog();
+    lastResultTime = Date.now();
+    watchdogTimer = setInterval(() => {
+      if(!running) return;
+      const idleFor = Date.now() - lastResultTime;
+      if(idleFor > STUCK_THRESHOLD_MS){
+        // Session looks alive but isn't actually delivering results anymore.
+        // Force a hard restart: stop, then onend will kick off a fresh start.
+        lastResultTime = Date.now(); // reset so we don't fire repeatedly mid-restart
+        try{ recognition.stop(); }
+        catch(e){
+          // stop() itself failed — try to rebuild from scratch
+          try{
+            recognition = buildRecognition();
+            recognition.start();
+          } catch(e2){ /* give up this cycle, watchdog will retry */ }
+        }
+      }
+    }, WATCHDOG_INTERVAL_MS);
+  }
+
+  function stopWatchdog(){
+    if(watchdogTimer){
+      clearInterval(watchdogTimer);
+      watchdogTimer = null;
+    }
+  }
+
   function startListening(){
     hideError();
     recognition = buildRecognition();
@@ -412,6 +427,7 @@
       recognition.start();
       running = true;
       setStatus('live');
+      startWatchdog();
     } catch(e){
       showError('음성 인식을 시작할 수 없습니다. 다시 시도해주세요.');
     }
@@ -419,6 +435,7 @@
 
   function stopListening(){
     running = false;
+    stopWatchdog();
     if(recognition){
       try{ recognition.stop(); } catch(e){}
     }
