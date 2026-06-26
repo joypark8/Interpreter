@@ -3,14 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>실시간 회의 통역</title>
+<title>회의 받아쓰기</title>
 <style>
   :root{
     --ink:#1b1f23;
     --paper:#f6f3ec;
     --line:#1b1f23;
-    --ko-accent:#c0432c;   /* terracotta-ish but warmer/redder for KO */
-    --en-accent:#2c5f8a;   /* steel blue for EN */
     --muted:#8a8478;
     --live:#3a7d44;
   }
@@ -29,7 +27,6 @@
     border-left:1px solid #00000012; border-right:1px solid #00000012;
   }
 
-  /* ---------- Header ---------- */
   header{
     padding:14px 18px 10px;
     border-bottom:2px solid var(--line);
@@ -54,45 +51,29 @@
     100%{ box-shadow:0 0 0 0 rgba(58,125,68,0); }
   }
 
-  /* ---------- Transcript area ---------- */
+  /* ---------- Single accumulating text box ---------- */
   #feed{
     flex:1; overflow-y:auto;
-    padding:16px 18px 8px;
-    display:flex; flex-direction:column;
-    gap:14px;
+    padding:18px;
   }
-  .entry{
-    display:flex; flex-direction:column; gap:4px;
-    animation:fadeIn 0.25s ease;
+  #transcript{
+    font-size:19px;
+    line-height:1.7;
+    white-space:pre-wrap;
+    word-break:break-word;
   }
-  @keyframes fadeIn{ from{opacity:0; transform:translateY(4px);} to{opacity:1; transform:translateY(0);} }
-  .entry .src-line{
-    font-size:17px; line-height:1.45; font-weight:500;
+  #transcript .final-chunk{
+    color:var(--ink);
   }
-  .entry .src-line .tag{
-    font-size:10px; font-weight:700; letter-spacing:0.06em;
-    padding:1px 6px; border-radius:3px; margin-right:8px;
-    vertical-align:2px;
-    color:#fff;
-  }
-  .tag.ko{ background:var(--ko-accent); }
-  .tag.en{ background:var(--en-accent); }
-  .entry .trans-line{
-    font-size:17px; line-height:1.45; font-weight:400;
+  #transcript .interim-chunk{
     color:var(--muted);
-    padding-left:2px;
-    border-left:2px solid #00000014;
-    padding-left:10px;
-    margin-left:1px;
   }
-  .entry.interim .src-line{ opacity:0.55; }
-  .entry .ts{
-    font-size:10px; color:var(--muted); letter-spacing:0.04em;
-  }
-
   #feed-empty{
-    margin:auto; text-align:center; color:var(--muted);
-    font-size:13px; line-height:1.6; padding:0 30px;
+    color:var(--muted);
+    font-size:13px; line-height:1.6;
+    text-align:center;
+    margin-top:40%;
+    padding:0 30px;
   }
 
   /* ---------- Footer / controls ---------- */
@@ -141,7 +122,7 @@
 <body>
 <div id="app">
   <header>
-    <h1>회의 받아쓰기 · Live</h1>
+    <h1>회의 받아쓰기</h1>
     <div class="status">
       <span class="dot" id="statusDot"></span>
       <span id="statusText">대기 중</span>
@@ -151,8 +132,9 @@
   <div id="feed">
     <div id="feed-empty">
       아래 버튼을 눌러 받아쓰기를 시작하세요.<br>
-      한국어와 영어를 자동으로 감지해서<br>들리는 그대로 보여드립니다.
+      말하는 대로 이 화면에 이어서 표시됩니다.
     </div>
+    <div id="transcript" style="display:none;"></div>
   </div>
 
   <footer>
@@ -167,8 +149,9 @@
 
 <script>
 (function(){
-  const feed = document.getElementById('feed');
   const feedEmpty = document.getElementById('feed-empty');
+  const transcriptEl = document.getElementById('transcript');
+  const feed = document.getElementById('feed');
   const micBtn = document.getElementById('micBtn');
   const clearBtn = document.getElementById('clearBtn');
   const statusDot = document.getElementById('statusDot');
@@ -185,33 +168,26 @@
   }
 
   let recognition = null;
-  let running = false;          // user-intended state (toggle)
-  let restarting = false;       // guard against double-start
-  let currentEntryEl = null;    // DOM node for the in-progress utterance
-  let currentLang = 'ko-KR';    // we alternate detection by listening in ko-KR primarily;
-                                 // Web Speech API doesn't support true auto-language-detection,
-                                 // so we run a simple heuristic: try ko-KR, and if result looks
-                                 // like it's mostly Latin characters, treat as English text
-                                 // and re-translate accordingly. See classifyText().
-  let lastFinalText = '';       // dedup guard: text of the most recent finalized entry
-  let lastFinalTime = 0;        // dedup guard: timestamp of the most recent finalized entry
-  let pendingInterimText = '';  // last interim text seen, in case the session ends before it's finalized
-  let pendingInterimLang = 'ko';
-  let lastResultTime = Date.now(); // last time onresult actually fired — used by the watchdog
-  let watchdogTimer = null;        // detects a "stuck" session (status says live but no results coming)
-  const WATCHDOG_INTERVAL_MS = 1200; // how often we check
-  const STUCK_THRESHOLD_MS = 2500;   // if no result for this long while running, force-restart
+  let running = false;            // user-intended state (toggle)
+  let restarting = false;         // guard against double-start
 
-  // Returns true if this text is a near-duplicate of the last finalized entry
-  // (handles cases where the recognizer re-emits the same utterance as final
-  // more than once, especially around an automatic restart boundary).
+  let finalizedText = '';         // everything confirmed so far, accumulated with spaces
+  let lastFinalChunk = '';        // most recent finalized chunk, for dedup
+  let lastFinalTime = 0;          // timestamp of most recent finalized chunk
+  let pendingInterim = '';        // current not-yet-final chunk, shown in muted color
+
+  let lastResultTime = Date.now(); // last time onresult actually fired — used by the watchdog
+  let watchdogTimer = null;
+  const WATCHDOG_INTERVAL_MS = 1200;
+  const STUCK_THRESHOLD_MS = 2500; // if no result for this long while running, force-restart
+
   function isDuplicateFinal(text){
     const now = Date.now();
     const withinWindow = (now - lastFinalTime) < 4000;
     if(!withinWindow) return false;
-    if(text === lastFinalText) return true;
-    if(text.length > 0 && lastFinalText.length > 0){
-      if(lastFinalText.includes(text) || text.includes(lastFinalText)) return true;
+    if(text === lastFinalChunk) return true;
+    if(text.length > 0 && lastFinalChunk.length > 0){
+      if(lastFinalChunk.includes(text) || text.includes(lastFinalChunk)) return true;
     }
     return false;
   }
@@ -238,58 +214,50 @@
     errorBox.style.display = 'none';
   }
 
-  // Detect whether a chunk of text is mostly Korean or mostly Latin/English.
-  function classifyText(text){
-    const koreanChars = (text.match(/[\uac00-\ud7a3]/g) || []).length;
-    const latinChars = (text.match(/[a-zA-Z]/g) || []).length;
-    if(koreanChars === 0 && latinChars === 0) return 'unknown';
-    return koreanChars >= latinChars ? 'ko' : 'en';
-  }
-
-  function timeNow(){
-    const d = new Date();
-    return d.toLocaleTimeString('ko-KR', {hour:'2-digit', minute:'2-digit'});
-  }
-
-  function createEntry(){
-    feedEmpty.style.display = 'none';
-    const el = document.createElement('div');
-    el.className = 'entry interim';
-    el.innerHTML = `
-      <div class="ts">${timeNow()}</div>
-      <div class="src-line"><span class="tag ko" style="display:none;"></span><span class="src-text"></span></div>
-    `;
-    feed.appendChild(el);
+  function renderTranscript(){
+    if(finalizedText || pendingInterim){
+      feedEmpty.style.display = 'none';
+      transcriptEl.style.display = 'block';
+    }
+    let html = '';
+    if(finalizedText){
+      html += `<span class="final-chunk">${escapeHtml(finalizedText)}</span>`;
+    }
+    if(pendingInterim){
+      html += (finalizedText ? ' ' : '') + `<span class="interim-chunk">${escapeHtml(pendingInterim)}</span>`;
+    }
+    transcriptEl.innerHTML = html;
     feed.scrollTop = feed.scrollHeight;
-    return el;
   }
 
-  function finalizeEntry(el, text, lang){
-    el.classList.remove('interim');
-    const tagSpan = el.querySelector('.tag');
-    const srcText = el.querySelector('.src-text');
-    const transLine = el.querySelector('.trans-line');
-
-    tagSpan.style.display = 'inline-block';
-    tagSpan.textContent = lang === 'ko' ? 'KO' : 'EN';
-    tagSpan.className = 'tag ' + lang;
-    srcText.textContent = text;
-    if(transLine) transLine.style.display = 'none';
+  function escapeHtml(str){
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
   }
 
-  function updateInterim(el, text, lang){
-    const tagSpan = el.querySelector('.tag');
-    const srcText = el.querySelector('.src-text');
-    tagSpan.style.display = 'inline-block';
-    tagSpan.textContent = lang === 'ko' ? 'KO' : 'EN';
-    tagSpan.className = 'tag ' + lang;
-    srcText.textContent = text;
-    feed.scrollTop = feed.scrollHeight;
+  function commitFinal(text){
+    const clean = text.trim();
+    if(!clean) return;
+    if(isDuplicateFinal(clean)){
+      pendingInterim = '';
+      renderTranscript();
+      return;
+    }
+    lastFinalChunk = clean;
+    lastFinalTime = Date.now();
+    finalizedText = finalizedText ? (finalizedText + ' ' + clean) : clean;
+    pendingInterim = '';
+    renderTranscript();
   }
 
   function buildRecognition(){
+    // We listen in Korean mode by default — Web Speech API's ko-KR recognizer
+    // is generally tolerant of mixed Korean/English speech (it will transcribe
+    // English words reasonably well within a ko-KR session), so we don't need
+    // to constantly switch recognizer language back and forth.
     const rec = new SpeechRecognition();
-    rec.lang = currentLang;
+    rec.lang = 'ko-KR';
     rec.continuous = true;
     rec.interimResults = true;
     rec.maxAlternatives = 1;
@@ -308,48 +276,23 @@
         }
       }
 
-      const liveText = (finalText || interimText).trim();
-      if(!liveText) return;
-
-      const lang = classifyText(liveText);
-      const effectiveLang = lang === 'unknown' ? 'ko' : lang;
-
-      if(!currentEntryEl){
-        currentEntryEl = createEntry();
-      }
-
       if(finalText.trim()){
-        const cleanFinal = finalText.trim();
-        if(isDuplicateFinal(cleanFinal)){
-          // Same utterance re-emitted as final (common right after an
-          // auto-restart) — drop the in-progress entry instead of duplicating.
-          if(currentEntryEl){
-            currentEntryEl.remove();
-            currentEntryEl = null;
-          }
-          pendingInterimText = '';
-          return;
-        }
-        lastFinalText = cleanFinal;
-        lastFinalTime = Date.now();
-        finalizeEntry(currentEntryEl, cleanFinal, effectiveLang);
-        currentEntryEl = null;
-        pendingInterimText = '';
-      } else {
-        pendingInterimText = interimText.trim();
-        pendingInterimLang = effectiveLang;
-        updateInterim(currentEntryEl, interimText.trim(), effectiveLang);
+        commitFinal(finalText);
+      } else if(interimText.trim()){
+        pendingInterim = interimText.trim();
+        renderTranscript();
       }
     };
 
     rec.onerror = (event) => {
       if(event.error === 'no-speech'){
-        // totally normal during pauses — do nothing, just let onend restart it
+        // normal during pauses — do nothing, onend will restart it
         return;
       }
       if(event.error === 'not-allowed' || event.error === 'service-not-allowed'){
         showError('마이크 권한이 필요합니다. 브라우저 설정에서 마이크 접근을 허용해주세요.');
         running = false;
+        stopWatchdog();
         setStatus('idle');
         return;
       }
@@ -361,29 +304,18 @@
     };
 
     rec.onend = () => {
-      // This fires both on natural pause timeouts AND on manual stop.
-      // If there's leftover interim text that never got finalized before the
-      // session cut off, finalize it now so the tail of the sentence isn't lost.
-      if(pendingInterimText && currentEntryEl){
-        if(!isDuplicateFinal(pendingInterimText)){
-          lastFinalText = pendingInterimText;
-          lastFinalTime = Date.now();
-          finalizeEntry(currentEntryEl, pendingInterimText, pendingInterimLang);
-        } else {
-          currentEntryEl.remove();
-        }
-        currentEntryEl = null;
-        pendingInterimText = '';
+      // Fires on natural pause timeouts AND manual stop.
+      // If there's leftover interim text that never got finalized, commit it
+      // now so the tail of the sentence isn't lost.
+      if(pendingInterim){
+        commitFinal(pendingInterim);
       }
-      // If the user still wants to be running, restart immediately (no delay) —
-      // this is what prevents words right after a pause from being dropped
-      // during the gap between sessions.
+      // Restart immediately if the user still wants to be listening — this is
+      // what prevents the gap between sessions from swallowing words.
       if(running && !restarting){
         restarting = true;
-        if(running){
-          try{ recognition.start(); }
-          catch(e){ /* already started, ignore */ }
-        }
+        try{ recognition.start(); }
+        catch(e){ /* already started, ignore */ }
         restarting = false;
       }
     };
@@ -398,16 +330,15 @@
       if(!running) return;
       const idleFor = Date.now() - lastResultTime;
       if(idleFor > STUCK_THRESHOLD_MS){
-        // Session looks alive but isn't actually delivering results anymore.
-        // Force a hard restart: stop, then onend will kick off a fresh start.
-        lastResultTime = Date.now(); // reset so we don't fire repeatedly mid-restart
+        // Session reports as "live" but isn't actually delivering results —
+        // force a hard restart.
+        lastResultTime = Date.now();
         try{ recognition.stop(); }
         catch(e){
-          // stop() itself failed — try to rebuild from scratch
           try{
             recognition = buildRecognition();
             recognition.start();
-          } catch(e2){ /* give up this cycle, watchdog will retry */ }
+          } catch(e2){ /* watchdog will retry next tick */ }
         }
       }
     }, WATCHDOG_INTERVAL_MS);
@@ -428,6 +359,7 @@
       running = true;
       setStatus('live');
       startWatchdog();
+      requestWakeLock();
     } catch(e){
       showError('음성 인식을 시작할 수 없습니다. 다시 시도해주세요.');
     }
@@ -440,6 +372,7 @@
       try{ recognition.stop(); } catch(e){}
     }
     setStatus('idle');
+    releaseWakeLock();
   }
 
   micBtn.addEventListener('click', () => {
@@ -451,24 +384,29 @@
   });
 
   clearBtn.addEventListener('click', () => {
-    feed.innerHTML = '';
-    feed.appendChild(feedEmpty);
+    finalizedText = '';
+    pendingInterim = '';
+    lastFinalChunk = '';
+    transcriptEl.innerHTML = '';
+    transcriptEl.style.display = 'none';
     feedEmpty.style.display = 'block';
-    currentEntryEl = null;
   });
 
-  // Keep screen awake while interpreting, if supported
+  // Keep screen awake while listening, if supported
   let wakeLock = null;
   async function requestWakeLock(){
     try{
       if('wakeLock' in navigator){
         wakeLock = await navigator.wakeLock.request('screen');
       }
-    } catch(e){ /* ignore, not critical */ }
+    } catch(e){ /* not critical, ignore */ }
   }
-  micBtn.addEventListener('click', () => {
-    if(!running) requestWakeLock();
-  });
+  function releaseWakeLock(){
+    if(wakeLock){
+      try{ wakeLock.release(); } catch(e){}
+      wakeLock = null;
+    }
+  }
 
 })();
 </script>
