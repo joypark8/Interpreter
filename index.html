@@ -195,6 +195,8 @@
                                  // and re-translate accordingly. See classifyText().
   let lastFinalText = '';       // dedup guard: text of the most recent finalized entry
   let lastFinalTime = 0;        // dedup guard: timestamp of the most recent finalized entry
+  let pendingInterimText = '';  // last interim text seen, in case the session ends before it's finalized
+  let pendingInterimLang = 'ko';
 
   // Returns true if this text is a near-duplicate of the last finalized entry
   // (handles cases where the recognizer re-emits the same utterance as final
@@ -339,13 +341,17 @@
             currentEntryEl.remove();
             currentEntryEl = null;
           }
+          pendingInterimText = '';
           return;
         }
         lastFinalText = cleanFinal;
         lastFinalTime = Date.now();
         finalizeEntry(currentEntryEl, cleanFinal, effectiveLang);
         currentEntryEl = null;
+        pendingInterimText = '';
       } else {
+        pendingInterimText = interimText.trim();
+        pendingInterimLang = effectiveLang;
         updateInterim(currentEntryEl, interimText.trim(), effectiveLang);
       }
     };
@@ -370,17 +376,29 @@
 
     rec.onend = () => {
       // This fires both on natural pause timeouts AND on manual stop.
-      // If the user still wants to be running, immediately restart —
-      // this is what prevents "long pause = session ends" behavior.
+      // If there's leftover interim text that never got finalized before the
+      // session cut off, finalize it now so the tail of the sentence isn't lost.
+      if(pendingInterimText && currentEntryEl){
+        if(!isDuplicateFinal(pendingInterimText)){
+          lastFinalText = pendingInterimText;
+          lastFinalTime = Date.now();
+          finalizeEntry(currentEntryEl, pendingInterimText, pendingInterimLang);
+        } else {
+          currentEntryEl.remove();
+        }
+        currentEntryEl = null;
+        pendingInterimText = '';
+      }
+      // If the user still wants to be running, restart immediately (no delay) —
+      // this is what prevents words right after a pause from being dropped
+      // during the gap between sessions.
       if(running && !restarting){
         restarting = true;
-        setTimeout(() => {
-          restarting = false;
-          if(running){
-            try{ recognition.start(); }
-            catch(e){ /* already started, ignore */ }
-          }
-        }, 200);
+        if(running){
+          try{ recognition.start(); }
+          catch(e){ /* already started, ignore */ }
+        }
+        restarting = false;
       }
     };
 
