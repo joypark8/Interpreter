@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>실시간 회의 통역</title>
+<style>
+  :root{
+    --ink:#1b1f23;
+    --paper:#f6f3ec;
+    --line:#1b1f23;
+    --ko-accent:#c0432c;   /* terracotta-ish but warmer/redder for KO */
+    --en-accent:#2c5f8a;   /* steel blue for EN */
+    --muted:#8a8478;
+    --live:#3a7d44;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color: transparent;}
+  html,body{
+    margin:0; padding:0; height:100%;
+    background:var(--paper);
+    color:var(--ink);
+    font-family: 'Helvetica Neue', Arial, sans-serif;
+    overscroll-behavior:none;
+  }
+  #app{
+    display:flex; flex-direction:column;
+    height:100vh; height:100dvh;
+    max-width:720px; margin:0 auto;
+    border-left:1px solid #00000012; border-right:1px solid #00000012;
+  }
+
+  /* ---------- Header ---------- */
+  header{
+    padding:14px 18px 10px;
+    border-bottom:2px solid var(--line);
+    display:flex; align-items:baseline; justify-content:space-between;
+  }
+  header h1{
+    font-size:15px; letter-spacing:0.08em; text-transform:uppercase;
+    font-weight:700; margin:0;
+  }
+  header .status{
+    font-size:11px; letter-spacing:0.05em; color:var(--muted);
+    display:flex; align-items:center; gap:6px;
+  }
+  .dot{
+    width:7px; height:7px; border-radius:50%;
+    background:var(--muted); flex-shrink:0;
+  }
+  .dot.live{ background:var(--live); animation:pulse 1.4s infinite; }
+  @keyframes pulse{
+    0%{ box-shadow:0 0 0 0 rgba(58,125,68,0.5); }
+    70%{ box-shadow:0 0 0 6px rgba(58,125,68,0); }
+    100%{ box-shadow:0 0 0 0 rgba(58,125,68,0); }
+  }
+
+  /* ---------- Transcript area ---------- */
+  #feed{
+    flex:1; overflow-y:auto;
+    padding:16px 18px 8px;
+    display:flex; flex-direction:column;
+    gap:14px;
+  }
+  .entry{
+    display:flex; flex-direction:column; gap:4px;
+    animation:fadeIn 0.25s ease;
+  }
+  @keyframes fadeIn{ from{opacity:0; transform:translateY(4px);} to{opacity:1; transform:translateY(0);} }
+  .entry .src-line{
+    font-size:17px; line-height:1.45; font-weight:500;
+  }
+  .entry .src-line .tag{
+    font-size:10px; font-weight:700; letter-spacing:0.06em;
+    padding:1px 6px; border-radius:3px; margin-right:8px;
+    vertical-align:2px;
+    color:#fff;
+  }
+  .tag.ko{ background:var(--ko-accent); }
+  .tag.en{ background:var(--en-accent); }
+  .entry .trans-line{
+    font-size:17px; line-height:1.45; font-weight:400;
+    color:var(--muted);
+    padding-left:2px;
+    border-left:2px solid #00000014;
+    padding-left:10px;
+    margin-left:1px;
+  }
+  .entry.interim .src-line{ opacity:0.55; }
+  .entry .ts{
+    font-size:10px; color:var(--muted); letter-spacing:0.04em;
+  }
+
+  #feed-empty{
+    margin:auto; text-align:center; color:var(--muted);
+    font-size:13px; line-height:1.6; padding:0 30px;
+  }
+
+  /* ---------- Footer / controls ---------- */
+  footer{
+    border-top:2px solid var(--line);
+    padding:14px 18px calc(14px + env(safe-area-inset-bottom));
+    display:flex; flex-direction:column; gap:10px;
+  }
+  .row{ display:flex; gap:10px; align-items:center; }
+  #micBtn{
+    flex:1;
+    height:54px;
+    border:2px solid var(--line);
+    background:var(--ink);
+    color:var(--paper);
+    font-size:14px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase;
+    border-radius:4px;
+    cursor:pointer;
+    transition:background 0.15s, color 0.15s;
+  }
+  #micBtn.active{
+    background:var(--live);
+    border-color:var(--live);
+    color:#fff;
+  }
+  #micBtn:active{ transform:scale(0.985); }
+  #clearBtn{
+    height:54px; width:54px;
+    border:2px solid var(--line);
+    background:transparent;
+    color:var(--ink);
+    border-radius:4px;
+    font-size:13px;
+    cursor:pointer;
+  }
+  .hint{
+    font-size:11px; color:var(--muted); text-align:center; letter-spacing:0.02em;
+  }
+  #errorBox{
+    display:none;
+    font-size:12px; color:#fff; background:#a23b2e;
+    padding:8px 10px; border-radius:4px; line-height:1.5;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>회의 통역 · Live</h1>
+    <div class="status">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusText">대기 중</span>
+    </div>
+  </header>
+
+  <div id="feed">
+    <div id="feed-empty">
+      아래 버튼을 눌러 통역을 시작하세요.<br>
+      한국어와 영어를 자동으로 인식해서<br>서로의 언어로 번역해 드립니다.
+    </div>
+  </div>
+
+  <footer>
+    <div id="errorBox"></div>
+    <div class="row">
+      <button id="micBtn">통역 시작</button>
+      <button id="clearBtn" title="기록 지우기">⟲</button>
+    </div>
+    <div class="hint">말 중간에 잠시 멈춰도 끊기지 않습니다 · Chrome 권장</div>
+  </footer>
+</div>
+
+<script>
+(function(){
+  const feed = document.getElementById('feed');
+  const feedEmpty = document.getElementById('feed-empty');
+  const micBtn = document.getElementById('micBtn');
+  const clearBtn = document.getElementById('clearBtn');
+  const statusDot = document.getElementById('statusDot');
+  const statusText = document.getElementById('statusText');
+  const errorBox = document.getElementById('errorBox');
+
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  if(!SpeechRecognition){
+    errorBox.style.display = 'block';
+    errorBox.textContent = '이 브라우저는 음성 인식을 지원하지 않습니다. 안드로이드 Chrome 브라우저에서 열어주세요.';
+    micBtn.disabled = true;
+    micBtn.style.opacity = 0.4;
+  }
+
+  let recognition = null;
+  let running = false;          // user-intended state (toggle)
+  let restarting = false;       // guard against double-start
+  let currentEntryEl = null;    // DOM node for the in-progress utterance
+  let currentLang = 'ko-KR';    // we alternate detection by listening in ko-KR primarily;
+                                 // Web Speech API doesn't support true auto-language-detection,
+                                 // so we run a simple heuristic: try ko-KR, and if result looks
+                                 // like it's mostly Latin characters, treat as English text
+                                 // and re-translate accordingly. See classifyText().
+
+  function setStatus(state){
+    if(state === 'live'){
+      statusDot.classList.add('live');
+      statusText.textContent = '듣는 중';
+      micBtn.textContent = '통역 중지';
+      micBtn.classList.add('active');
+    } else {
+      statusDot.classList.remove('live');
+      statusText.textContent = '대기 중';
+      micBtn.textContent = '통역 시작';
+      micBtn.classList.remove('active');
+    }
+  }
+
+  function showError(msg){
+    errorBox.style.display = 'block';
+    errorBox.textContent = msg;
+  }
+  function hideError(){
+    errorBox.style.display = 'none';
+  }
+
+  // Detect whether a chunk of text is mostly Korean or mostly Latin/English.
+  function classifyText(text){
+    const koreanChars = (text.match(/[\uac00-\ud7a3]/g) || []).length;
+    const latinChars = (text.match(/[a-zA-Z]/g) || []).length;
+    if(koreanChars === 0 && latinChars === 0) return 'unknown';
+    return koreanChars >= latinChars ? 'ko' : 'en';
+  }
+
+  function timeNow(){
+    const d = new Date();
+    return d.toLocaleTimeString('ko-KR', {hour:'2-digit', minute:'2-digit'});
+  }
+
+  function createEntry(){
+    feedEmpty.style.display = 'none';
+    const el = document.createElement('div');
+    el.className = 'entry interim';
+    el.innerHTML = `
+      <div class="ts">${timeNow()}</div>
+      <div class="src-line"><span class="tag ko" style="display:none;"></span><span class="src-text"></span></div>
+      <div class="trans-line"><span class="trans-text">번역 중…</span></div>
+    `;
+    feed.appendChild(el);
+    feed.scrollTop = feed.scrollHeight;
+    return el;
+  }
+
+  async function translateText(text, sourceLang){
+    // sourceLang: 'ko' or 'en'. Target is the opposite.
+    const target = sourceLang === 'ko' ? 'en' : 'ko';
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sourceLang}&tl=${target}&dt=t&q=${encodeURIComponent(text)}`;
+    try{
+      const res = await fetch(url);
+      const data = await res.json();
+      // data[0] is an array of [translatedChunk, originalChunk, ...]
+      return data[0].map(chunk => chunk[0]).join('');
+    } catch(e){
+      return '(번역 실패 — 인터넷 연결을 확인하세요)';
+    }
+  }
+
+  function finalizeEntry(el, text, lang){
+    el.classList.remove('interim');
+    const tagSpan = el.querySelector('.tag');
+    const srcText = el.querySelector('.src-text');
+    const transText = el.querySelector('.trans-text');
+
+    tagSpan.style.display = 'inline-block';
+    tagSpan.textContent = lang === 'ko' ? 'KO' : 'EN';
+    tagSpan.className = 'tag ' + lang;
+    srcText.textContent = text;
+
+    translateText(text, lang).then(translated => {
+      transText.textContent = translated;
+      feed.scrollTop = feed.scrollHeight;
+    });
+  }
+
+  function updateInterim(el, text, lang){
+    const tagSpan = el.querySelector('.tag');
+    const srcText = el.querySelector('.src-text');
+    tagSpan.style.display = 'inline-block';
+    tagSpan.textContent = lang === 'ko' ? 'KO' : 'EN';
+    tagSpan.className = 'tag ' + lang;
+    srcText.textContent = text;
+    feed.scrollTop = feed.scrollHeight;
+  }
+
+  function buildRecognition(){
+    const rec = new SpeechRecognition();
+    rec.lang = currentLang;
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+
+    rec.onresult = (event) => {
+      let interimText = '';
+      let finalText = '';
+
+      for(let i = event.resultIndex; i < event.results.length; i++){
+        const transcript = event.results[i][0].transcript;
+        if(event.results[i].isFinal){
+          finalText += transcript;
+        } else {
+          interimText += transcript;
+        }
+      }
+
+      const liveText = (finalText || interimText).trim();
+      if(!liveText) return;
+
+      const lang = classifyText(liveText);
+      const effectiveLang = lang === 'unknown' ? 'ko' : lang;
+
+      if(!currentEntryEl){
+        currentEntryEl = createEntry();
+      }
+
+      if(finalText.trim()){
+        finalizeEntry(currentEntryEl, finalText.trim(), effectiveLang);
+        currentEntryEl = null;
+      } else {
+        updateInterim(currentEntryEl, interimText.trim(), effectiveLang);
+      }
+    };
+
+    rec.onerror = (event) => {
+      if(event.error === 'no-speech'){
+        // totally normal during pauses — do nothing, just let onend restart it
+        return;
+      }
+      if(event.error === 'not-allowed' || event.error === 'service-not-allowed'){
+        showError('마이크 권한이 필요합니다. 브라우저 설정에서 마이크 접근을 허용해주세요.');
+        running = false;
+        setStatus('idle');
+        return;
+      }
+      if(event.error === 'network'){
+        showError('네트워크 오류가 발생했습니다. 인터넷 연결을 확인하세요.');
+        return;
+      }
+      // other transient errors: ignore, rely on onend to restart
+    };
+
+    rec.onend = () => {
+      // This fires both on natural pause timeouts AND on manual stop.
+      // If the user still wants to be running, immediately restart —
+      // this is what prevents "long pause = session ends" behavior.
+      if(running && !restarting){
+        restarting = true;
+        setTimeout(() => {
+          restarting = false;
+          if(running){
+            try{ recognition.start(); }
+            catch(e){ /* already started, ignore */ }
+          }
+        }, 200);
+      }
+    };
+
+    return rec;
+  }
+
+  function startListening(){
+    hideError();
+    recognition = buildRecognition();
+    try{
+      recognition.start();
+      running = true;
+      setStatus('live');
+    } catch(e){
+      showError('음성 인식을 시작할 수 없습니다. 다시 시도해주세요.');
+    }
+  }
+
+  function stopListening(){
+    running = false;
+    if(recognition){
+      try{ recognition.stop(); } catch(e){}
+    }
+    setStatus('idle');
+  }
+
+  micBtn.addEventListener('click', () => {
+    if(running){
+      stopListening();
+    } else {
+      startListening();
+    }
+  });
+
+  clearBtn.addEventListener('click', () => {
+    feed.innerHTML = '';
+    feed.appendChild(feedEmpty);
+    feedEmpty.style.display = 'block';
+    currentEntryEl = null;
+  });
+
+  // Keep screen awake while interpreting, if supported
+  let wakeLock = null;
+  async function requestWakeLock(){
+    try{
+      if('wakeLock' in navigator){
+        wakeLock = await navigator.wakeLock.request('screen');
+      }
+    } catch(e){ /* ignore, not critical */ }
+  }
+  micBtn.addEventListener('click', () => {
+    if(!running) requestWakeLock();
+  });
+
+})();
+</script>
+</body>
+</html>
